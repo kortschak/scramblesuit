@@ -134,7 +134,7 @@ func (d *Device) ReadFrame() (image.Image, error) {
 	}
 
 	raw := d.buffers[buf.Index][:buf.BytesUsed]
-	img, err := d.decode(raw)
+	img, err := d.Decode(raw)
 
 	// Re-queue the buffer regardless of decode success so the
 	// driver can reuse it.
@@ -143,6 +143,19 @@ func (d *Device) ReadFrame() (image.Image, error) {
 		return nil, fmt.Errorf("VIDIOC_QBUF: %w", qerr)
 	}
 	return img, err
+}
+
+// Decode converts a raw frame buffer to an image using the device's
+// current pixel format.
+func (d *Device) Decode(raw []byte) (image.Image, error) {
+	switch d.PixFmt {
+	case PixelFormatMJPEG:
+		return jpeg.Decode(bytes.NewReader(raw))
+	case PixelFormatYUYV:
+		return yuyvToImage(raw, d.Width, d.Height), nil
+	default:
+		return nil, fmt.Errorf("unsupported pixel format %s", d.PixFmt)
+	}
 }
 
 // ReadRawFrame dequeues one filled buffer, copies its raw bytes, and
@@ -300,19 +313,6 @@ func (d *Device) CaptureFrame(warmup int) (image.Image, error) {
 		}
 	}
 	return d.ReadFrame()
-}
-
-// decode converts a raw frame buffer to an image using the device's
-// current pixel format.
-func (d *Device) decode(raw []byte) (image.Image, error) {
-	switch d.PixFmt {
-	case PixelFormatMJPEG:
-		return jpeg.Decode(bytes.NewReader(raw))
-	case PixelFormatYUYV:
-		return yuyvToImage(raw, d.Width, d.Height), nil
-	default:
-		return nil, fmt.Errorf("unsupported pixel format %s", d.PixFmt)
-	}
 }
 
 // ---------- Format enumeration ----------

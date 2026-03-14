@@ -16,6 +16,11 @@ You will also need to install the v4l2loopback kernel module. This may require b
 sudo modprobe v4l2loopback exclusive_caps=1 video_nr=10 card_label="Scramble-Suit"
 ```
 
+If using pass-through in addition to scrambling,
+```
+sudo modprobe v4l2loopback exclusive_caps=1,1 video_nr=10,11 card_label="Scramble-Suit","Unscrambled"
+```
+
 ### Running the Filter
 
 You can run the filter and immediately see the results in any application (like VLC or Zoom) by selecting the "Scramble-Suit" source.

@@ -28,7 +28,7 @@ func main() {
 	out := flag.String("out", "frame.png", "output PNG path")
 	warmup := flag.Int("warmup", 20, "frames to discard for auto-exposure settling")
 	list := flag.Bool("list", false, "list supported formats and controls, then exit")
-	loopback := flag.String("loopback", "", "v4l2loopback device to mirror frames to (e.g. /dev/video2)")
+	loopback := flag.String("loopback", "", "v4l2loopback device to mirror frames to: processed[,pass-through] (e.g. /dev/video2 or /dev/video2,/dev/video3)")
 
 	scramble := flag.Bool("scramble", true, "scramble output")
 	qual := flag.Int("qual", 75, "jpeg quality")
@@ -145,11 +145,20 @@ func runLoopback(devPath, loopPath string, scramble bool, gen int, down float64,
 	}
 	defer d.Close()
 
+	loopPath, passThrough, ok := strings.Cut(loopPath, ",")
 	lb, err := video.OpenLoopback(loopPath, d)
 	if err != nil {
 		log.Fatal(err)
 	}
 	defer lb.Close()
+	var pt *video.Loopback
+	if ok && scramble {
+		pt, err = video.OpenLoopback(passThrough, d)
+		if err != nil {
+			log.Fatal(err)
+		}
+		defer pt.Close()
+	}
 
 	err = d.Start()
 	if err != nil {
@@ -160,12 +169,78 @@ func runLoopback(devPath, loopPath string, scramble bool, gen int, down float64,
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt)
 	defer stop()
 
-	fmt.Printf("mirroring %dx%d (%s) %s → %s (ctrl-c to stop)\n",
-		d.Width, d.Height, d.PixFmt, devPath, loopPath)
+	var process = "mirroring"
+	if scramble {
+		process = "scrambling"
+	}
+	fmt.Printf("%s %dx%d (%s) %s → %s",
+		process, d.Width, d.Height, d.PixFmt, devPath, loopPath)
+	if pt != nil {
+		fmt.Printf(" (pass-through %s → %s)", devPath, passThrough)
+	}
+	fmt.Println("\n(ctrl-c to stop)")
 
 	var frames uint64
+	token := make(chan struct{}, 1)
 	for ctx.Err() == nil {
-		if scramble {
+		if !scramble {
+			raw, err := d.ReadRawFrame()
+			if err != nil {
+				if ctx.Err() != nil {
+					break
+				}
+				log.Fatal(err)
+			}
+			err = lb.WriteFrame(raw)
+			if err != nil {
+				log.Fatal(err)
+			}
+			frames++
+
+			continue
+		}
+
+		if pt != nil {
+			// If we are running pass-through, we don't want to hold
+			// up the unscrambled frames, so handle them first.
+			raw, err := d.ReadRawFrame()
+			if err != nil {
+				if ctx.Err() != nil {
+					break
+				}
+				log.Fatal(err)
+			}
+			err = pt.WriteFrame(raw)
+			if err != nil {
+				log.Fatal(err)
+			}
+
+			// We also don't want to block pass-through on scrambling,
+			// so drop scramble frames if we are still working on one.
+			go func() {
+				select {
+				case token <- struct{}{}:
+					// We have an opportunity to run
+					// a scramble frame, take it and
+					// block any other frame scrambling
+					// until we are done.
+					defer func() {
+						<-token
+					}()
+				default:
+					// Drop frame.
+					return
+				}
+				img, err := d.Decode(raw)
+				if err != nil {
+					log.Fatal(err)
+				}
+				err = scrambleTo(lb, img, down, gen, d.PixFmt, qual)
+				if err != nil {
+					log.Fatal(err)
+				}
+			}()
+		} else {
 			img, err := d.ReadFrame()
 			if err != nil {
 				if ctx.Err() != nil {
@@ -174,49 +249,42 @@ func runLoopback(devPath, loopPath string, scramble bool, gen int, down float64,
 				log.Fatal(err)
 			}
 
-			bounds := img.Bounds()
-			dst := image.NewNRGBA(bounds)
-			if down != 1 {
-				tmp := image.NewNRGBA(image.Rectangle{
-					Max: image.Point{
-						X: int(float64(bounds.Dx()) * down),
-						Y: int(float64(bounds.Dy()) * down),
-					},
-				})
-				draw.BiLinear.Scale(tmp, tmp.Bounds(), img, img.Bounds(), draw.Src, nil)
-				img = tmp
-			}
-			vi := fracture.Vector(img, gen, false, false)
-			vi.RenderTo(dst)
-
-			raw, err := video.EncodeFrame(dst, d.PixFmt, qual)
+			// If we're not running pass-through, always scramble. If
+			// we lose frames, it's better here to lose them at the
+			// V4L2 frame capture rather than collecting that and then
+			// dropping it with the logic above.
+			err = scrambleTo(lb, img, down, gen, d.PixFmt, qual)
 			if err != nil {
 				log.Fatal(err)
 			}
-			err = lb.WriteFrame(raw)
-			if err != nil {
-				log.Fatal(err)
-			}
-
-			frames++
-
-			continue
 		}
 
-		raw, err := d.ReadRawFrame()
-		if err != nil {
-			if ctx.Err() != nil {
-				break
-			}
-			log.Fatal(err)
-		}
-		err = lb.WriteFrame(raw)
-		if err != nil {
-			log.Fatal(err)
-		}
 		frames++
 	}
 	fmt.Printf("\n%d frames mirrored\n", frames)
+}
+
+func scrambleTo(dev *video.Loopback, img image.Image, down float64, gen int, pixfmt video.PixelFormat, qual int) error {
+	bounds := img.Bounds()
+	dst := image.NewNRGBA(bounds)
+	if down != 1 {
+		tmp := image.NewNRGBA(image.Rectangle{
+			Max: image.Point{
+				X: int(float64(bounds.Dx()) * down),
+				Y: int(float64(bounds.Dy()) * down),
+			},
+		})
+		draw.BiLinear.Scale(tmp, tmp.Bounds(), img, img.Bounds(), draw.Src, nil)
+		img = tmp
+	}
+	vi := fracture.Vector(img, gen, false, false)
+	vi.RenderTo(dst)
+
+	raw, err := video.EncodeFrame(dst, pixfmt, qual)
+	if err != nil {
+		return err
+	}
+	return dev.WriteFrame(raw)
 }
 
 func writeRaster(img image.Image, path, format string, qual int) {
