@@ -9,6 +9,7 @@ import (
 	"image/jpeg"
 	"slices"
 	"strings"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -37,7 +38,7 @@ type Device struct {
 // a device's supported formats and controls without committing to
 // capture. Call Close when done.
 func ProbeDevice(path string) (*Device, error) {
-	fd, err := unix.Open(path, unix.O_RDWR, 0)
+	fd, err := unix.Open(path, unix.O_RDWR|unix.O_NONBLOCK, 0)
 	if err != nil {
 		return nil, fmt.Errorf("open %s: %w", path, err)
 	}
@@ -120,15 +121,19 @@ func (d *Device) Start() error {
 // image.Image, and re-queues the buffer. The returned image owns its
 // pixel data. It does not alias the mmap'd buffer.
 //
-// Blocks until the driver has a frame ready.
+// Waits via poll until the driver has a frame ready.
 func (d *Device) ReadFrame() (image.Image, error) {
 	if !d.streaming {
 		return nil, fmt.Errorf("not streaming (call Start first)")
 	}
+	err := d.waitReadable(5 * time.Second)
+	if err != nil {
+		return nil, err
+	}
 	var buf v4l2Buffer
 	buf.Type = bufTypeVideoCapture
 	buf.Memory = memoryMMAP
-	err := v4l2ioctl(d.fd, vidiocDqbuf, unsafe.Pointer(&buf))
+	err = v4l2ioctl(d.fd, vidiocDqbuf, unsafe.Pointer(&buf))
 	if err != nil {
 		return nil, fmt.Errorf("VIDIOC_DQBUF: %w", err)
 	}
@@ -161,14 +166,20 @@ func (d *Device) Decode(raw []byte) (image.Image, error) {
 // ReadRawFrame dequeues one filled buffer, copies its raw bytes, and
 // re-queues the buffer. Returns the frame in the device's pixel format
 // without decoding. This is useful for forwarding to a loopback device.
+//
+// Waits via poll until the driver has a frame ready.
 func (d *Device) ReadRawFrame() ([]byte, error) {
 	if !d.streaming {
 		return nil, fmt.Errorf("not streaming (call Start first)")
 	}
+	err := d.waitReadable(5 * time.Second)
+	if err != nil {
+		return nil, err
+	}
 	var buf v4l2Buffer
 	buf.Type = bufTypeVideoCapture
 	buf.Memory = memoryMMAP
-	err := v4l2ioctl(d.fd, vidiocDqbuf, unsafe.Pointer(&buf))
+	err = v4l2ioctl(d.fd, vidiocDqbuf, unsafe.Pointer(&buf))
 	if err != nil {
 		return nil, fmt.Errorf("VIDIOC_DQBUF: %w", err)
 	}
@@ -181,6 +192,34 @@ func (d *Device) ReadRawFrame() ([]byte, error) {
 		return nil, fmt.Errorf("VIDIOC_QBUF: %w", err)
 	}
 	return raw, nil
+}
+
+// waitReadable blocks until the device has at least one filled buffer
+// ready to dequeue, using poll rather than a blocking VIDIOC_DQBUF.
+//
+// A blocking VIDIOC_DQBUF holds V4L2 driver-internal locks while
+// waiting, which can deadlock against a concurrent VIDIOC_S_FMT from
+// another process (e.g. a video chat app opening the same device).
+// poll holds no such locks, so concurrent openers can negotiate access
+// without stalling this reader.
+func (d *Device) waitReadable(timeout time.Duration) error {
+	fds := []unix.PollFd{{Fd: int32(d.fd), Events: unix.POLLIN}}
+	for {
+		n, err := unix.Poll(fds, int(timeout/time.Millisecond))
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("poll %s: timed out waiting for frame", d.path)
+		}
+		if fds[0].Revents&(unix.POLLERR|unix.POLLHUP|unix.POLLNVAL) != 0 {
+			return fmt.Errorf("poll %s: device error or disconnect", d.path)
+		}
+		return nil
+	}
 }
 
 // Stop halts streaming. Safe to call if not currently streaming.

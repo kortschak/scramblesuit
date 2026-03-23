@@ -21,7 +21,7 @@
 //	./ioctl -dev /dev/video0 -loopback /dev/video2
 //
 // Signal handling uses signal.NotifyContext on os.Interrupt. Since
-// ReadRawFrame blocks on DQBUF (typically returns within one frame
+// ReadRawFrame blocks in poll (typically returns within one frame
 // period, ~33ms at 30fps), there is at most one frame of latency
 // between ctrl-c and clean exit.
 
