@@ -233,7 +233,9 @@ func runLoopback(devPath, loopPath string, scramble bool, gen int, down float64,
 				}
 				img, err := d.Decode(raw)
 				if err != nil {
-					log.Fatal(err)
+					// Drop corrupt frames. For example partial MJPEG
+					// after STREAMON before the encoder settles.
+					return
 				}
 				err = scrambleTo(lb, img, down, gen, d.PixFmt, qual)
 				if err != nil {
@@ -246,7 +248,9 @@ func runLoopback(devPath, loopPath string, scramble bool, gen int, down float64,
 				if ctx.Err() != nil {
 					break
 				}
-				log.Fatal(err)
+				// Drop corrupt frames rather than dying; some
+				// cameras deliver garbage immediately after STREAMON.
+				continue
 			}
 
 			// If we're not running pass-through, always scramble. If
