@@ -158,6 +158,8 @@ func (d *Device) Decode(raw []byte) (image.Image, error) {
 		return jpeg.Decode(bytes.NewReader(raw))
 	case PixelFormatYUYV:
 		return yuyvToImage(raw, d.Width, d.Height), nil
+	case PixelFormatUYVY:
+		return uyvyToImage(raw, d.Width, d.Height), nil
 	default:
 		return nil, fmt.Errorf("unsupported pixel format %s", d.PixFmt)
 	}
@@ -259,6 +261,7 @@ func (d *Device) setFormat() error {
 
 	supported := []PixelFormat{
 		PixelFormatYUYV,
+		PixelFormatUYVY,
 		PixelFormatMJPEG,
 	}
 	var chosen PixelFormat

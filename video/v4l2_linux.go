@@ -33,10 +33,11 @@ func (pf PixelFormat) String() string {
 	return string([]byte{byte(pf), byte(pf >> 8), byte(pf >> 16), byte(pf >> 24)})
 }
 
-// Pixel format codes for the two formats we can decode.
+// Pixel format codes for the formats we can decode.
 // See include/uapi/linux/videodev2.h.
 const (
-	PixelFormatYUYV  = PixelFormat(C.V4L2_PIX_FMT_YUYV)  // uncompressed 4:2:2
+	PixelFormatYUYV  = PixelFormat(C.V4L2_PIX_FMT_YUYV)  // Y0 U Y1 V
+	PixelFormatUYVY  = PixelFormat(C.V4L2_PIX_FMT_UYVY)  // U Y0 V Y1
 	PixelFormatMJPEG = PixelFormat(C.V4L2_PIX_FMT_MJPEG) // motion-JPEG
 )
 
